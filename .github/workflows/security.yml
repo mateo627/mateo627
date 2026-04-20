@@ -1,0 +1,100 @@
+name: Security Checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  dependency-scan:
+    name: Dependency vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy dependency scan (JSON report)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+        with:
+          scan-type: fs
+          scan-ref: .
+          vuln-type: library
+          format: json
+          output: trivy-dependencies.json
+          exit-code: 0
+          ignore-unfixed: false
+
+      - name: Fail on HIGH/CRITICAL vulnerabilities
+        run: |
+          high_critical_count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length' trivy-dependencies.json)
+          echo "HIGH/CRITICAL vulnerabilities: ${high_critical_count}"
+          if [ "${high_critical_count}" -gt 0 ]; then
+            echo "Blocking build due to HIGH/CRITICAL dependency vulnerabilities."
+            exit 1
+          fi
+
+      - name: Upload dependency scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-dependencies-report
+          path: trivy-dependencies.json
+          if-no-files-found: error
+
+  static-analysis:
+    name: Static analysis / security lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Semgrep
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install semgrep
+
+      - name: Run Semgrep security rules (JSON report)
+        run: semgrep scan --config p/security-audit --json --output semgrep.json .
+
+      - name: Fail on ERROR-severity findings
+        run: |
+          error_count=$(jq '[.results[]? | select(.extra.severity == "ERROR")] | length' semgrep.json)
+          echo "ERROR severity findings: ${error_count}"
+          if [ "${error_count}" -gt 0 ]; then
+            echo "Blocking build due to high-severity static analysis findings."
+            exit 1
+          fi
+
+      - name: Upload static analysis report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-security-report
+          path: semgrep.json
+          if-no-files-found: error
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Gitleaks (SARIF report)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: false
+
+      - name: Upload secret scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-secret-report
+          path: results.sarif
+          if-no-files-found: error
